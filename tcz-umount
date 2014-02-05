@@ -1,0 +1,79 @@
+#!/bin/sh
+. /usr/local/lib/tcztools/aliases
+. /usr/local/lib/tcztools/die
+
+usage() {
+    say "\
+Uninstall a mounted tcz extension.
+v1.0 | Cosmin Apreutesei | tcztools.googlecode.com | MIT License
+
+Usage: $0 [--quiet|-q] [--dry-run|-d] <name>
+
+Remove all symlinks pointing to a mounted tcz extension and umounts
+the extension loop device and remove the mount point, basically
+uninstalling the extension.
+
+Files that are not symlinks to the extension loop mount anymore are shown
+with a '?' in front, and those which are missing with '!'. In dry-run mode
+it also shows the symlinks that would have been deleted.
+"
+    exit 1
+}
+
+[ "$1" == "--dry-run" -o "$1" == "-d" ] && { DRY=$1; shift; }
+[ "$1" == "--quiet" -o "$1" == "-q" ] && { QUIET=true; shift; }
+[ "$1" == "--help" ] && usage
+[ "$1" ] && name="$1" || usage
+loop="/tmp/tcloop/$name"
+tceinst="/usr/local/tce.installed/$name"
+[ -d "$loop" ] || die "$loop not found"
+[ -f "$tceinst" ] || die "$tceinst not found."
+
+#remove tce.installed file if it was added by tce-load
+[ -s "$tcelinst" ] || {
+    if [ "$DRY" ]; then
+        say "rm $tceinst"
+    else
+        run sudo rm "$tceinst"
+    fi
+}
+
+#remove symlinks pointing back to the tcloop
+must cd "$loop"
+must find * | while read path; do
+    if [ -h "/$path" ]; then
+        target="$(readlink "/$path")"
+        if [ "$target" == "$loop/$path" ]; then
+            if [ "$DRY" ]; then
+                say "rm /$path"
+            else
+                run sudo rm "/$path"
+            fi
+        else
+            say "? /$path -> $target"
+        fi
+    elif [ -e "/$path" ]; then
+        [ -d "/$path" ] || say "? /$path"
+    else
+        say "! /$path"
+    fi
+done || die "failed to remove symlinks"
+
+[ "$DRY" ] || {
+    #remove empty directories
+    #note: dry-run can't show these since it doesn't empty them!
+    must cd "$loop"
+    run find * -depth -type d | while read path; do
+        run sudo find "/$path" -maxdepth 0 -type d -empty -delete
+    done
+
+    #finally, umount the loop device
+    must cd / #close the loop dir fd
+    run sudo umount -df "$loop" || {
+        error "Umount failed. Processes preventing umount:"
+        lsof | grep "$loop"
+        exit 1
+    }
+    run sudo rmdir "$loop"
+}
+

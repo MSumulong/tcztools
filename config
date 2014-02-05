@@ -1,0 +1,25 @@
+#!/bin/sh (source it!)
+#config file creation, loading, and option checking
+
+CONF="$HOME/.tcztoolsrc"
+
+[ -f "$CONF" ] || {
+    echo -n "Your name please? "; read author
+    echo -n "And your email address? "; read author_email
+    echo "\
+author=\"$author\"
+author_email=\"$author_email\"
+edit_email_before_sending=\"no\"
+edit_info_file_after_creating=\"no\"
+" > "$CONF" && say "This information was saved in $CONF." || die "Could not create $CONF."
+}
+
+submit_email="tcesubmit@gmail.com"
+
+. "$CONF"
+
+checkopt() { [ "$2" ] || die "option $1 missing from $CONF."; }
+checkopt author "$author"
+checkopt author_email "$author_email"
+checkopt submit_email "$submit_email"
+

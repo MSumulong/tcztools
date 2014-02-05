@@ -1,0 +1,16 @@
+#!/bin/sh
+#copy-over install (instead of mounting the tcz)
+
+for dep in $(cat tcztools.tcz.dep); do
+    tce-load -i $dep &>/dev/null
+done
+
+sudo mkdir -p /usr/local/lib/tcztools
+for f in aliases die config; do
+    sudo ln -sf "$PWD"/$f /usr/local/lib/tcztools/
+done
+
+for f in tcz-pack tcz-submit tcz-umount; do
+    sudo ln -sf "$PWD"/$f /usr/local/bin/
+done
+

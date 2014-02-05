@@ -1,0 +1,159 @@
+#!/bin/sh
+. /usr/local/lib/tcztools/aliases
+. /usr/local/lib/tcztools/die
+. /usr/local/lib/tcztools/config
+
+usage() {
+    [ "$@" ] && error "$@"
+    say "\
+Create tcz extensions from files in the current directory.
+v1.0 | Cosmin Apreutesei | tcztools.googlecode.com | MIT License
+
+Usage: $0 [-y|--yes] [-q|--quiet] [--debug] <name1> ...
+
+Creates an extension for each given <name> using:
+    ./<name>            : binaries (or symlinks to binaries) directory
+    ./<name>.tcz.info   : extension's info file
+    ./<name>.tcz.dep    : list of dependencies (optional)
+
+Features:
+ - creates a tcz.info stub if none present, with autocompleted fields
+ - dereferences symlinks to /tmp/ - we consider them static mappings to
+ where the binaries were built or unpacked
+ - strips libs and exes
+ - fixes permissions of all files to root:root, 755/644
+ - fixes perms of tce.installed to root:staff 775
+ - fixes perms of tce.installed/<name> to root:staff 755
+ - creates .tcz, .tcz.md5.txt and .tcz.list files
+ - updates the Size field in tcz.info to the actual size of the .tcz file
+ - copies the .tcz to the local tce dir for trying it out with tce-load -i
+"
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes | -y) YES=$1 ;;
+        --quiet | -q) QUIET=$1 ;;
+        --debug) DEBUG=$1 ;;
+        --help) usage ;;
+        -*) usage "Unknown option $1" ;;
+        *) break ;;
+    esac
+    shift
+done
+
+while [ $# -gt 1 ]; do
+    "$0" $YES $QUIET $DEBUG "$1"
+    shift
+done
+
+[ "$1" ] && name="$1" || usage
+[ -d ./$name ] || die "Source directory ./$name missing."
+
+#make a stub .info if there isn't one
+[ -f $name.tcz.info ] || {
+    local today="$(date -I)"; today="${today//-//}"
+    echo "\
+Title:          $name.tcz
+Description:    $name (TESTING)
+Version:        ----
+Author:         ----
+Original-site:  ----
+Copying-policy: ----
+Size:           ----
+Extension_by:   $author
+Comments:       ----
+Change-log:     $today
+Current:        $today
+" > $name.tcz.info || die "Could not create $name.tcz.info."
+[ "$YES" -o "$edit_info_file_after_creating" == "no" ] && die "\
+A stub info file $name.tcz.info was created in the current directory.
+Please edit it to fill in the missing fields and pack $name again."
+editor $name.tcz.info
+}
+must dos2unix $name.tcz.info
+
+tmp=/tmp/tcztools
+say "Packing $name from ./$name into $tmp/$name.tcz..."
+
+#copy source files to a temp dir so we can fiddle with them
+#hopefully they are mostly symlinks to build dirs so this shouldn't take long
+must sudo rm -rf $tmp/$name
+must mkdir -p $tmp/$name
+must cp -r $name/. $tmp/$name
+
+#dereference links to /tmp: we consider these to be mappings to build dir location
+#TODO: this doesn't allow files with \t and \n in the name!
+/usr/local/bin/find $tmp/$name -type l -printf "%l\t%p\n" | grep "^/tmp/" | \
+while read target path; do
+    must rm "$path"
+    must cp -r "$target" "$path"
+done || die "Failed to dereference symlinks to /tmp/ [$?]. Forgot to build the binaries?"
+
+#strip libs and executables
+find $tmp/$name | xargs file | grep "executable" | grep ELF | \
+    grep "not stripped" | cut -f1 -d':' | xargs strip --strip-unneeded 2>/dev/null
+find $tmp/$name | xargs file | grep "shared object" | grep ELF | \
+    grep "not stripped" | cut -f1 -d':' | xargs strip -g 2>/dev/null
+
+#fix perms: make all files root-owned, public, read only; fix executable flag.
+#reason: extensions should not contain private files. u|g|o+x should be a+x.
+fix() {
+    while read f; do
+        must sudo "$1" "$2" "$f"
+    done
+}
+findopt=
+user=root
+group=root
+dirmode=0755
+exemode=0755
+filemode=0644
+find $tmp/$name $findopt -type d ! -perm $dirmode | fix chmod $dirmode || die "Fixing perms failed."
+find $tmp/$name $findopt -type f -perm +0111 ! -perm $exemode | fix chmod $exemode || die "Fixing perms failed."
+find $tmp/$name $findopt -type f ! -perm +0111 ! -perm $filemode | fix chmod $filemode || die "Fixing perms failed."
+find $tmp/$name $findopt ! -type l ! -user $user | fix chown $user || die "Fixing perms failed."
+find $tmp/$name $findopt ! -type l ! -group $group | fix chgrp $group || die "Fixing perms failed."
+
+#fix tce.installed perms
+tceinst=$tmp/$name/usr/local/tce.installed
+[ -d "$tceinst" ] && {
+    must sudo chown root:staff "$tceinst"
+    must sudo chmod 775 "$tceinst"
+    [ -f "$tceinst/$name" ] || \
+        die "\
+$tceinst directory found but no $name script inside.
+Either remove the directory or create the installation script."
+    must sudo chmod 755 "$tceinst/$name"
+}
+
+#package it for loading with tce-load
+must rm -rf $tmp/$name.tcz
+must mksquashfs $tmp/$name $tmp/$name.tcz -b 4096 -no-progress >/dev/null
+(cd $tmp; must md5sum $name.tcz > $tmp/$name.tcz.md5.txt)
+(cd $tmp/$name; find * ! -type d) > $tmp/$name.tcz.list
+[ -s $tmp/$name.tcz.list ] || die "List file $name.tcz.list is empty."
+
+#update Size in .info file
+size="$(du -h $tmp/$name.tcz | cut -f1)"
+[ "$size" ] || die "Could not get the size of $name.tcz"
+must sed -i "s/^Size:.*$/Size:\t\t$size/" $name.tcz.info
+
+#copy it to local tce dir for testing with tce-load -i
+read tcedir < /opt/.tce_dir || die "Could not find tce directory."
+must cp -f $tmp/$name.tcz "$tcedir/optional"
+must cp -f $tmp/$name.tcz.md5.txt "$tcedir/optional"
+[ -f $name.tcz.dep ] && must cp -f $name.tcz.dep "$tcedir/optional"
+#tcedir should be sgid=staff so tc can read it
+must chmod 2660 "$tcedir/optional/$name.tcz"
+must chmod 2660 "$tcedir/optional/$name.tcz.md5.txt"
+[ -f $name.tcz.dep ] && must chmod 2660 "$tcedir/optional/$name.tcz.dep"
+
+echo "$name.tcz: OK"
+say "\
+Reboot with \"norestore lst=none tce=hdxy\" and run 'tce-load -i $name'.
+You can 'tcz-submit $name' afterwards to submit it to the Tiny Core team."
+
+exit 0
+
